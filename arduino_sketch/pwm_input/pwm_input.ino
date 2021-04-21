@@ -46,7 +46,7 @@ void loop() {
       Serial.println(integerValue);
       continue;
   }
-  if (motor_pwm_value > 0) // if the motor_pwm_value is greater than zero we rotate the  motor in clockwise direction
+  if (integerValue > 0) // if the motor_pwm_value is greater than zero we rotate the  motor in clockwise direction
     motor_ccw(integerValue);
   else // else we move it in a counter clockwise direction
     motor_cw(abs(integerValue));
@@ -64,7 +64,7 @@ void motor_cw(int power) {
     digitalWrite(MOTOR_CCW, LOW); // make the other pin LOW
   }
   else {
-    // both of the pins are set to low    
+    // both of the pins are set to low
     digitalWrite(MOTOR_CW, LOW);
     digitalWrite(MOTOR_CCW, LOW);
   }
@@ -79,4 +79,3 @@ void motor_ccw(int power) {
     digitalWrite(MOTOR_CCW, LOW);
   }
 }
-
