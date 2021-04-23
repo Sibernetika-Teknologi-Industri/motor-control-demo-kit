@@ -14,9 +14,9 @@
 
 /* Definition List **************/
 // PID Param Definition
-#define KP 1.8
-#define KI 0.05
-#define KD 3.0
+#define KP 0.75
+#define KI 0.025
+#define KD 0.8
 
 // Pin Definition
 #define ENC_A 2
@@ -24,22 +24,23 @@
 #define MTR_CW 5
 #define MTR_CCW 6
 #define BT1 7
-#define LM_SW1 8
-#define LM_SW2 9
 #define POT A0
 
 // Limit Definition
 #define MAX_ENC 506
-#define MAX_PWM 100
-#define MIN_PWM 30
+#define MAX_ANGLE 360
+#define MAX_PWM 255.0f
+#define MIN_PWM 45.0f
+#define SCALER 0.71146f
 
 /* Variable List ****************/
 double err, err_I, err_D, err_prev, mtr_pwm_cmd;
-volatile int mtr_pos;
+volatile float mtr_pos = 0;
 int timer1_counter;
 int read_pot, set_point, set_point_prev;
 bool last_state = false;
 float mtr_pos_last;
+float sp;
 
 int i = 0;
 
@@ -64,7 +65,7 @@ void setup() {
   //--------------------------end time setup
   interrupts();
 
-  //Serial.begin(9600);
+  Serial.begin(9600);
   pinMode(ENC_A, INPUT);
   pinMode(ENC_B, INPUT);
   attachInterrupt(digitalPinToInterrupt(ENC_A),count_encoder,RISING);
@@ -72,8 +73,6 @@ void setup() {
   pinMode(MTR_CW, OUTPUT);
   pinMode(MTR_CCW, OUTPUT);
 
-  pinMode(LM_SW1, INPUT_PULLUP);
-  pinMode(LM_SW2, INPUT_PULLUP);
   pinMode(BT1, INPUT_PULLUP);
 
   mtr_pos = 0;
@@ -91,11 +90,22 @@ void setup() {
 /* Loop *********************************/
 void loop() {
   read_pot = analogRead(0);
-  set_point = wrapVal(map(read_pot, 0, 1023, 0, MAX_ENC),MAX_ENC);
-  check_set_point_change(); //refresh LCD only when set point change
+  set_point = wrapVal(map(read_pot, 0, 1023, 0, MAX_ANGLE),MAX_ANGLE);
+//  set_point = wrapVal(map(read_pot, 0, 1023, 0, MAX_ENC),MAX_ENC);
+  
 
+  if(digitalRead(BT1)) sp = 0;
+  else sp = set_point;
+
+  check_set_point_change(); //refresh LCD only when set point change
+  
   update_lcd();
   
+  Serial.print(sp);
+  Serial.print("\t");
+  Serial.println(mtr_pos);
+//  Serial.print("\t");
+//  Serial.println(mtr_pwm_cmd);
 }
 
 /* Function Declaration ******************************/
@@ -124,31 +134,34 @@ void update_lcd(){
   lcd.print("SP:");
   lcd.setCursor(3, 1);
   lcd.print(set_point_prev);
-  lcd.setCursor(8, 1);
-  lcd.print("ACT:");
-  lcd.setCursor(12, 1);
-  lcd.print(mtr_pos);
+  lcd.setCursor(9, 1);
+  lcd.print("PV:");
   
-  if( (abs(mtr_pos_last)>100 && abs(mtr_pos) < 100) || (abs(mtr_pos_last)>10 && abs(mtr_pos) < 10) || (mtr_pos_last<00 && (mtr_pos) > 00)){
+  
+  if(should_clear_screen(mtr_pos,mtr_pos_last) || mtr_pos == 0){
     lcd.setCursor(12,1);
     lcd.print("      ");
   }
+
+  lcd.setCursor(12, 1);
+  lcd.print(int(sign(mtr_pos) * floor(abs(mtr_pos))));
+  
   mtr_pos_last = mtr_pos;
 }
 
 // Fungsi untuk interrupt perhitungan encoder
 void count_encoder() {
-  if (digitalRead(ENC_B)) mtr_pos +=1;
-  else mtr_pos -= 1;
+  if (digitalRead(ENC_B)) mtr_pos +=SCALER;
+  else mtr_pos -= SCALER;
 
-//  mtr_pos = wrapVal(wrapAngle(mtr_pos, MAX_ENC),MAX_ENC);
+//  mtr_pos = mtr_pos * SCALER;
 
-//  //Serial.println(mtr_pos);
+//  Serial.println(mtr_pos);
 }
 
 // Fungsi untuk update set_point ke LCD
 void check_set_point_change() {
-  if (abs(set_point - set_point_prev) > 10) //avoid stack number
+  if(should_clear_screen(set_point,set_point_prev)) //avoid stack number
   {
     lcd.setCursor(3,1);
     lcd.print("    ");
@@ -157,6 +170,11 @@ void check_set_point_change() {
   else {
     set_point_prev = set_point;
   }
+}
+
+bool should_clear_screen(float a, float prev){
+  if((abs(prev)>=100 && abs(a) < 100) || (abs(prev)>=10 && abs(a) < 10) || (prev<0 && (a) >= 0)) return true;
+  else return false;
 }
 
 // Fungsi untuk PID (Interrupt service routine - tick every 0.1sec)
@@ -185,11 +203,11 @@ ISR(TIMER1_OVF_vect) {
 //     
 //   }
 
-  if(last_state) set_point = 0;
   
-  err = set_point - mtr_pos;
+  err = (sp - mtr_pos);
+  err = sign(err) * floor(abs(err));
   if(abs(err) < 1) err = 0;
-  if(err/abs(err) != err_prev/abs(err_prev)) err_I = 0; // anti windup
+  if(sign(err) != sign(err_prev)) err_I = 0; // anti windup
 
   err_D = (err - err_prev);
   mtr_pwm_cmd = err * KP + err_I * KI + err_D * KD;
@@ -198,7 +216,7 @@ ISR(TIMER1_OVF_vect) {
     
   // Move the motor
   mtr_pwm_cmd = floor(wrapVal(mtr_pwm_cmd, MAX_PWM));
-  if(mtr_pwm_cmd > 0) mtr_pwm_cmd = mtr_pwm_cmd/abs(mtr_pwm_cmd) * map(abs(mtr_pwm_cmd), 0, MAX_PWM, MIN_PWM, MAX_PWM);
+  if(mtr_pwm_cmd != 0) mtr_pwm_cmd = sign(mtr_pwm_cmd) * map(abs(mtr_pwm_cmd), 0, MAX_PWM, MIN_PWM, MAX_PWM);
 
   if (mtr_pwm_cmd > 0){
     digitalWrite(MTR_CW, LOW);
@@ -232,6 +250,14 @@ float wrapAngle(float a, float lim){
 }
 
 float printPID(float a){
-  if(a<0.1) return a*10;
-  else return a;
+  float x = a;
+  while(x<0.1){
+    x = x * 10;
+  }
+  return x;
+}
+
+float sign(float a) {
+  if(a == 0) return 1;
+  else return a/abs(a);
 }
