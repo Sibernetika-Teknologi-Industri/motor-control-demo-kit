@@ -1,24 +1,44 @@
 /*
  **************************************************
- *  File    : pid_position_control_dev_siber.ino
- *  Author  : Dimas AP., Husnul A., Prasetyo W.
- *            (PT Sibernetika Teknologi Industri)
- *  Brief   : Kode untuk PID Position Control Kit
+ *  File      : pid_position_control_dev_siber.ino
+ *  Author    : Dimas AP., Husnul A., Prasetyo W.
+ *              (PT Sibernetika Teknologi Industri - Bandung, Indonesia)
+ *  Brief     : PID Position Control Kit
+ *  Hardware  : 1. Arduino Nano
+ *              2. HG7881 Motor Driver
+ *              3. JGA25-370 motor (130 RPM)
+ *                  - HALL Encoder (11 ticks/rev motor without gearbox)
+ *                  - Gear Ratio 1:46 (506 ticks/rev output gearbox)
+ *              4. 12 Volt Power Suppy
+ *              5. 16x2 LCD display & I2C adapter
+ *              6. Push Button
+ *              7. Potentiometer
+ *  Repo      : https://github.com/dispectra/motor-control-demo-kit/
  **************************************************
  */
 
 /* Includes **********************************/
-#include <Wire.h> // Library komunikasi I2C
-#include <LiquidCrystal_I2C.h> // Library modul I2C LCD
-
+#include <Wire.h>               // I2C Communication Lib
+#include <LiquidCrystal_I2C.h>  // LCD I2C Lib
 
 /* Definition List **************/
-// PID Param Definition
-#define KP 0.75
+/* PID Param Definition **
+ * KP   : Proportional Gain
+ * KI   : Integral Gain
+ * KD   : Derivative Gain
+ */
+#define KP 0.7
 #define KI 0.025
-#define KD 0.8
+#define KD 0.5
 
-// Pin Definition
+/* Pin Definition **
+ * ENC_A    : A pin of the encoder
+ * ENC_B    : B pin of the encoder
+ * MTR_CW   : Clockwise motor pin
+ * MTR_CCW  : Counter-clockwise motor pin
+ * BT1      : Button pin
+ * POT      : Potentiometer pin
+ */
 #define ENC_A 2
 #define ENC_B 3
 #define MTR_CW 5
@@ -26,7 +46,15 @@
 #define BT1 7
 #define POT A0
 
-// Limit Definition
+/* Limit Definition **
+ * MAX_ANALOG_INPUT : Max analogRead output (arduino nano has 10 bit analog input resolution, hence max value = 2^10-1)
+ * MAX_ENC          : Ticks / Rev Hall Encoder
+ * MAX_ANGLE        : Angle / Rev
+ * MAX_PWM          : Max allowed PWM (arduino nano pwm pin has 8 bit resolution, hence max value = 2^8 - 1)
+ * MIN_PWM          : Deadband before motor could start turning
+ * SCALER           : Scaling increment to convert 1 tick of 506 ticks to x degree of 360 degs
+ */
+#define MAX_ANALOG_INPUT 1023
 #define MAX_ENC 506
 #define MAX_ANGLE 360
 #define MAX_PWM 255.0f
@@ -34,23 +62,29 @@
 #define SCALER 0.71146f
 
 /* Variable List ****************/
+// PID Vars
 double err, err_I, err_D, err_prev, mtr_pwm_cmd;
+
+// Encoder Vars
 volatile float mtr_pos = 0;
-int timer1_counter;
-int read_pot, set_point, set_point_prev;
-bool last_state = false;
 float mtr_pos_last;
-float sp;
 
-int i = 0;
+// Button & Potentio Vars
+int read_pot, read_pot_prev, set_point;
+bool last_state = false;
 
+// LCD Vars
 LiquidCrystal_I2C lcd = LiquidCrystal_I2C(0x27, 16, 2);
+
+// ISR Vars
+int timer1_counter;
 
 /* Function Promises ***********/
 void count_encoder();
-void check_set_point_change();
 float wrapVal(float, float);
-float wrapAngle(float, float);
+float sign(float);
+float floor_abs(float);
+float printPID(float);
 
 /* SETUP **********************/
 void setup() {
@@ -65,19 +99,17 @@ void setup() {
   //--------------------------end time setup
   interrupts();
 
-  Serial.begin(9600);
-  pinMode(ENC_A, INPUT);
-  pinMode(ENC_B, INPUT);
-  attachInterrupt(digitalPinToInterrupt(ENC_A),count_encoder,RISING);
+  Serial.begin(9600);       //  Enable serial at baud rate 9600
+  pinMode(ENC_A, INPUT);    //  Set ENC_A pin as input
+  pinMode(ENC_B, INPUT);    //  Set ENC_B pin as input
+  attachInterrupt(digitalPinToInterrupt(ENC_A),count_encoder,RISING); // Attach Interrupt at pin ENC_A
 
-  pinMode(MTR_CW, OUTPUT);
-  pinMode(MTR_CCW, OUTPUT);
+  pinMode(MTR_CW, OUTPUT);  //  Set MTR_CW pin as output
+  pinMode(MTR_CCW, OUTPUT); //  Set MTR_CCW pin as output
 
-  pinMode(BT1, INPUT_PULLUP);
+  pinMode(BT1, INPUT_PULLUP); //  Set ENC_B pin as input_pullup
 
-  mtr_pos = 0;
-
-  // inisialisasi LCD:
+  // LCD Init
   lcd.init();
   lcd.backlight();
   lcd.clear();
@@ -89,135 +121,119 @@ void setup() {
 
 /* Loop *********************************/
 void loop() {
-  read_pot = analogRead(0);
-  set_point = wrapVal(map(read_pot, 0, 1023, 0, MAX_ANGLE),MAX_ANGLE);
-//  set_point = wrapVal(map(read_pot, 0, 1023, 0, MAX_ENC),MAX_ENC);
-  
+  // Read Potentiometer
+  read_pot = wrapVal(map(analogRead(0), 0, MAX_ANALOG_INPUT, 0, MAX_ANGLE),MAX_ANGLE);
 
-  if(digitalRead(BT1)) sp = 0;
-  else sp = set_point;
+  // If button engaged -> Set set_point to potentiometer reading, otherwise set it to 0
+  if(!digitalRead(BT1)) set_point = read_pot;
+  else set_point = 0;
 
-  check_set_point_change(); //refresh LCD only when set point change
-  
+  // Print states to LCD
   update_lcd();
-  
-  Serial.print(sp);
-  Serial.print("\t");
-  Serial.println(mtr_pos);
-//  Serial.print("\t");
-//  Serial.println(mtr_pwm_cmd);
+
+  // Print SP and PV to Serial Plotter
+  Serial.print("set_point:");Serial.print(set_point);
+  Serial.print(", ");
+  Serial.print("actual_value:");Serial.println(int(mtr_pos));
 }
 
 /* Function Declaration ******************************/
-void update_lcd(){
-  lcd.setCursor(0, 0);
-  lcd.print("PID:");
-  lcd.setCursor(4, 0);lcd.print(" ");
-  
-  lcd.setCursor(5, 0);
-  lcd.print(printPID(KP));
-  
-  lcd.setCursor(8, 0);lcd.print(" ");
-  
-//  lcd.setCursor(6, 0);
-//  lcd.print("I:");
-  lcd.setCursor(9, 0);
-  lcd.print(printPID(KI));
-//  lcd.setCursor(11, 0);
-//  lcd.print("D:");
 
+/* FX update_lcd **
+ * @brief: To update display text on the 16x2 LCD via LiquidCrystal_I2C lib
+ * @return_value: None
+ */
+void update_lcd(){
+  // ROW 1 :  PID
+  lcd.setCursor(0, 0);lcd.print("PID:");
+  lcd.setCursor(4, 0);lcd.print(" ");
+  lcd.setCursor(5, 0);lcd.print(printPID(KP));
+  lcd.setCursor(8, 0);lcd.print(" ");
+  lcd.setCursor(9, 0);lcd.print(printPID(KI));
   lcd.setCursor(12, 0);lcd.print(" ");
-  lcd.setCursor(13, 0);
-  lcd.print(printPID(KD));
-  // Set Point
-  lcd.setCursor(0, 1);
-  lcd.print("SP:");
-  lcd.setCursor(3, 1);
-  lcd.print(set_point_prev);
-  lcd.setCursor(9, 1);
-  lcd.print("PV:");
-  
-  
-  if(should_clear_screen(mtr_pos,mtr_pos_last) || mtr_pos == 0){
+  lcd.setCursor(13, 0);lcd.print(printPID(KD));
+
+  // ROW 2  : Set Point
+  lcd.setCursor(0, 1);lcd.print("SP:");
+  if(should_clear_screen(read_pot,read_pot_prev)) { // Prevent Character buildup
+    lcd.setCursor(3,1);
+    lcd.print("    ");
+  }
+  lcd.setCursor(3, 1);lcd.print(read_pot);
+
+  // ROW 2  : Actual Position (process variable)
+  lcd.setCursor(9, 1);lcd.print("PV:");
+  if(should_clear_screen(mtr_pos,mtr_pos_last)){  // Prevent Character buildup
     lcd.setCursor(12,1);
     lcd.print("      ");
   }
+  lcd.setCursor(12, 1); lcd.print(int(sign(mtr_pos) * floor(abs(mtr_pos))));
 
-  lcd.setCursor(12, 1);
-  lcd.print(int(sign(mtr_pos) * floor(abs(mtr_pos))));
-  
+  // Update last vars
   mtr_pos_last = mtr_pos;
+  read_pot_prev = read_pot;
 }
 
-// Fungsi untuk interrupt perhitungan encoder
+/* FX count_encoder **
+ * @brief: To update motor pos value based on encoder A and B readings
+ *          (Run as interrupt function for pin ENC_A)
+ * @return_value: None
+ */
 void count_encoder() {
   if (digitalRead(ENC_B)) mtr_pos +=SCALER;
   else mtr_pos -= SCALER;
-
-//  mtr_pos = mtr_pos * SCALER;
-
-//  Serial.println(mtr_pos);
 }
 
-// Fungsi untuk update set_point ke LCD
-void check_set_point_change() {
-  if(should_clear_screen(set_point,set_point_prev)) //avoid stack number
-  {
-    lcd.setCursor(3,1);
-    lcd.print("    ");
-    set_point_prev = set_point;
-  }
-  else {
-    set_point_prev = set_point;
-  }
-}
-
+/* BOOL should_clear_screen **
+ * @brief: To decide whether it is required to clear the screen before printing the LCD Values
+ *          (Preventing charater bulking)
+ * @logic: If current value has less charater than previous value
+ *          Then clear the screen before printing
+ * @input: a = current value; prev = previous value
+ * @return_value: boolean; true = required to clear, false vice versa
+ */
 bool should_clear_screen(float a, float prev){
-  if((abs(prev)>=100 && abs(a) < 100) || (abs(prev)>=10 && abs(a) < 10) || (prev<0 && (a) >= 0)) return true;
+  if((abs(prev)>=100 && abs(a) < 100) || (abs(prev)>=10 && abs(a) < 10) || (prev<0 && (a) >= 0) || (a == 0 && prev != 0)) return true;
   else return false;
 }
 
-// Fungsi untuk PID (Interrupt service routine - tick every 0.1sec)
+/* ISR Control Loop **
+ * @brief: To run the control loop every 0.1 sec via Interrupt Service Routine
+ *          (Using hardware timer as the timer)
+ * @logic: Calculate err --> Calculate PID output --> Send output to motor driver
+ * @return_value: none
+ */
 ISR(TIMER1_OVF_vect) {
   // Set timer
   TCNT1 = timer1_counter;
 
-  // Count PID Output
-  
+  // Decide if the state just recently changed
+  //    If so --> reset PID values
   bool bt = digitalRead(BT1);
-
   if (bt != last_state) {
     last_state = bt;
     err = err_prev = err_I = err_D = mtr_pwm_cmd = 0;
   }
 
-//  if(!last_state) {
-//   
-//
-//  } else {
-//     while(!digitalRead(LM_SW1)){ // remove ! on real implementation
-//       digitalWrite(MTR_CW, LOW);
-//       analogWrite(MTR_CCW, 100);
-//     }
-//     if(!digitalRead(LM_SW1)) mtr_pos = 0;
-//     
-//   }
-
-  
-  err = (sp - mtr_pos);
-  err = sign(err) * floor(abs(err));
-  if(abs(err) < 1) err = 0;
-  if(sign(err) != sign(err_prev)) err_I = 0; // anti windup
-
+  // Update Error States
+  err = (set_point - mtr_pos);
+  err = floor_abs(err);
+  if(abs(err) < 1) err = 0;                   // Assume err < 1 as already good enough
+  if(sign(err) != sign(err_prev)) err_I = 0;  // Reset Integral value whenever err crossed zero (Anti Windup)
   err_D = (err - err_prev);
+
+  // Count PID Output
   mtr_pwm_cmd = err * KP + err_I * KI + err_D * KD;
+
+  // Update Error States
   err_prev = err;
   err_I += err;
-    
-  // Move the motor
-  mtr_pwm_cmd = floor(wrapVal(mtr_pwm_cmd, MAX_PWM));
+
+  // Make sure pwm output consider all the system constraints
+  mtr_pwm_cmd = wrapVal(floor_abs(mtr_pwm_cmd), MAX_PWM);
   if(mtr_pwm_cmd != 0) mtr_pwm_cmd = sign(mtr_pwm_cmd) * map(abs(mtr_pwm_cmd), 0, MAX_PWM, MIN_PWM, MAX_PWM);
 
+  // Move the motor accordingly
   if (mtr_pwm_cmd > 0){
     digitalWrite(MTR_CW, LOW);
     analogWrite(MTR_CCW, abs(mtr_pwm_cmd));
@@ -225,39 +241,48 @@ ISR(TIMER1_OVF_vect) {
     digitalWrite(MTR_CCW, LOW);
     analogWrite(MTR_CW, abs(mtr_pwm_cmd));
   }
-
-  //Serial.println(err);
 }
 
-// Utils
+/* Utils Declaration ******************************/
+/* FLOAT wrapVal **
+ * @brief: To wrap values into certain limit
+ * @input: a = value to process; b = limit to process
+ * @return_value: float
+ */
 float wrapVal(float a, float b){
   if (a<-b) return -b;
   else if (a>b) return b;
   else return a;
 }
 
-float wrapAngle(float a, float lim){
-  float x = a;
-  if(a > lim) {
-    while(x - lim > lim){
-      x = x-lim;
-    }
-    return x;
-  }
-  else if(a < 0) return lim-a;
-  else return a;
-
+/* FLOAT sign **
+ * @brief: To obtain the sign of a number
+ * @input: a = value to process;
+ * @return_value: float; -1 for negative values, 1 for positive ones.
+ */
+float sign(float a) {
+  if(a == 0) return 1;
+  else return a/abs(a);
 }
 
+/* FLOAT floor_abs **
+ * @brief: To floor number both with positive or negative values
+ * @input: val = number to process
+ * @return_value: float
+ */
+float floor_abs(float val){
+  return sign(val) * floor(abs(val));
+}
+
+/* FLOAT printPID **
+ * @brief: To format PID value so it will be printed nicely on the LCD :)
+ * @input: a = value to process;
+ * @return_value: float
+ */
 float printPID(float a){
   float x = a;
   while(x<0.1){
     x = x * 10;
   }
   return x;
-}
-
-float sign(float a) {
-  if(a == 0) return 1;
-  else return a/abs(a);
 }
